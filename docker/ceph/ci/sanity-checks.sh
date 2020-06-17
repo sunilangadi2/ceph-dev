@@ -1,9 +1,9 @@
-#!/bin/bash
+#!/bin/bash -i
 
 set -e
 
 REPO_DIR=/ceph
-PYTHON_VERSION=$(grep MGR_PYTHON_VERSION:STRING /ceph/build/CMakeCache.txt | cut -d '=' -f 2)
+[[ "$IS_UPSTREAM" == 1 && "$CEPH_VERSION" -le '14' ]] && PYTHON_VERSION=2 || PYTHON_VERSION=3
 TRANSLATION_FILE=src/pybind/mgr/dashboard/frontend/src/locale/messages.xlf
 
 run_npm_ci() {
@@ -14,12 +14,44 @@ run_npm_ci() {
     npm ci
 }
 
+run_npm_lint_html() {
+    echo 'Running "npm lint:html"...'
+
+    cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
+
+    npm run lint:html --if-present
+}
+
+check_browser_console_calls() {
+    echo 'Checking browser console calls...'
+
+    cd "$REPO_DIR"
+
+    local TARGET="$@"
+    [[ -z "${TARGET}" ]] && TARGET="$REPO_DIR"/src/pybind/mgr/dashboard/frontend/src/app
+    local CONSOLE_CALLS=$((echo "${TARGET}" | xargs grep -Eirn "console\..*\(") || echo '')
+    if [[ -n "${CONSOLE_CALLS}" ]]; then
+        echo "${CONSOLE_CALLS}
+
+ERROR: please remove browser console calls."
+        exit 1
+    fi
+}
+
+run_npm_fix() {
+    echo 'Running "npm fix"...'
+
+    cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
+
+    npm run fix --if-present
+}
+
 run_npm_lint() {
     echo 'Running "npm lint"...'
 
     cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
 
-    npm run lint
+    npm run lint --silent
 }
 
 run_jest() {
@@ -27,11 +59,12 @@ run_jest() {
 
     cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
 
+    local JEST_OPTIONS="--maxWorkers=$(nproc --ignore=3)"
     if [[ -n "$@" ]]; then
-        npm run test:config
-        npx jest "$@"
+        [[ "$CEPH_VERSION" -le '15' ]] && npm run test:config --if-present
+        npx jest "$@" ${JEST_OPTIONS}
     else
-        npm run test:ci -- --maxWorkers=$(nproc --ignore=2)
+        npm run test:ci -- ${JEST_OPTIONS}
     fi
 
     echo 'All tests passed: OK'
@@ -83,25 +116,27 @@ run_tox() {
         else
             TOX_ARGS="py3-$TOX_ARGS"
         fi
-        if [[ "$TOX_ARGS" == *'py27-'* && "$PYTHON_VERSION" == '3' ]]; then
+        if [[ "$TOX_ARGS" == *'py27-'* && "$PYTHON_VERSION" == 3 ]]; then
             echo 'Python 3 build detected: switching to python 3 tox env.'
             TOX_ARGS=${TOX_ARGS//py27-/py3-}
-        elif [[ "$TOX_ARGS" == *'py3-'* && "$PYTHON_VERSION" != '3' ]]; then
+        elif [[ "$TOX_ARGS" == *'py3-'* && "$PYTHON_VERSION" != 3 ]]; then
             echo 'Python 2 build detected: switching to python 2 tox env.'
             TOX_ARGS=${TOX_ARGS//py3-/py27-}
         fi
-        if [[ -n "$CEPH_RPM_REPO_DIR" ]]; then
+        if [[ "${IS_CEPH_RPM}" == 1 ]]; then
             TOX_OPTIONS='--sitepackages'
         fi
     else # Master env list.
         if [[ -z "$TOX_ARGS" ]]; then
             # Default behaviour (pre-commit)
-            TOX_ARGS='py27,py3,lint,check'
+            TOX_ARGS='py3,lint,check'
         elif [[ "${1:0:6}" == 'tests/' ]]; then
             # Run user-defined unit tests
             TOX_ARGS="py3 $TOX_ARGS"
         fi
     fi
+
+    find . -name ".coverage" -exec rm -f {} \;
 
     tox ${TOX_OPTIONS} -e $TOX_ARGS
 
@@ -114,7 +149,7 @@ run_tox() {
 run_mypy() {
     cd "$REPO_DIR"
 
-    if [[ "$PYTHON_VERSION" != '3' || "$CHECK_MYPY" == '0' ]]; then
+    if [[ "$PYTHON_VERSION" != 3 || "$CHECK_MYPY" == '0' ]]; then
         echo 'SKIPPED: mypy'
         return 0
     fi
@@ -141,17 +176,20 @@ setup_api_tests_env() {
 
     cd "$REPO_DIR"/build
 
-    rm -rf "$CEPH_CONF_PATH" && mkdir "$CEPH_CONF_PATH"
+    rm -rf "$CEPH_CONF_PATH"/*
     rm -f vstart_runner.log
+
+    # vstart_runner uses /ceph/build cluster path.
     ln -sf "$CEPH_DEV_DIR" /ceph/build/dev
     ln -sf "$CEPH_OUT_DIR" /ceph/build/out
     ln -sf "$CEPH_CONF" /ceph/build/ceph.conf
     ln -sf "$CEPH_CONF_PATH"/keyring /ceph/build/keyring
-
-    if [[ -n "$CEPH_RPM_REPO_DIR" ]]; then
+    if [[ "${IS_CEPH_RPM}" == 1 ]]; then
         ln -s "$CEPH_BIN" /ceph/build/bin
         ln -s "$CEPH_LIB" /ceph/build/lib
-        export TEUTHOLOGY_PYTHON_BIN=/usr/bin/python2
+        if [[ "$CEPH_VERSION" -le '14' ]]; then
+            echo "MGR_PYTHON_VERSION:STRING=${PYTHON_VERSION}" >> /ceph/build/CMakeCache.txt
+        fi
     fi
 
     echo 'API tests environment setup finished!'
@@ -163,6 +201,7 @@ create_api_tests_cluster() {
     setup_api_tests_env
 
     cd "$REPO_DIR"/src/pybind/mgr/dashboard
+    set +e
     source ./run-backend-api-tests.sh
 
     echo 'API tests cluster created!'
@@ -183,19 +222,29 @@ run_api_tests() {
 run_frontend_e2e_tests() {
     echo 'Running frontend E2E tests...'
 
-    ARGS="--dev-server-target"
+    E2E_CMD="npx cypress run --browser chrome $@"
+    if [[ "$CEPH_VERSION" == '15' ]]; then
+        E2E_CMD="npm run e2e:ci"
+    elif [[ "$CEPH_VERSION" == '14' ]]; then
+        E2E_CMD="npm run e2e:dev"
+    fi
+    export E2E_CMD
     if [[ "$DASHBOARD_DEV_SERVER" != 1 ]]; then
-        if [[ $(ps -ef | grep -v grep | grep "ng build" | wc -l) == 0 ]]; then
-            export DASHBOARD_DEV_SERVER=0
-            export FRONTEND_BUILD_OPTIONS="--deleteOutputPath=false --prod"
-
+        if [[ $(ps -ef | grep -v grep | grep "ceph-mgr -i" | wc -l) == 0 ]]; then
             cd "$CEPH_CONF_PATH"
             "$REPO_DIR"/src/stop.sh
 
             /docker/start-ceph.sh
         fi
 
-        export BASE_URL=$(jq -r '.["/api/"].target' "$REPO_DIR"/src/pybind/mgr/dashboard/frontend/proxy.conf.json)
+        BASE_URL=null
+        while [[ "${BASE_URL}" == 'null' ]]; do
+            export BASE_URL=$("$CEPH_BIN"/ceph mgr services | jq -r .dashboard)
+            sleep 1
+        done
+        if [[ "$CEPH_VERSION" -ge '16' ]]; then
+            export CYPRESS_BASE_URL="${BASE_URL}"
+        fi
         cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
         ANGULAR_VERSION=$(npm run ng version | grep 'Angular: ' | awk '{ print substr($2,1,1) }')
         # In nautilus this flag is required because BASE_URL is not read in protractor config.
@@ -206,7 +255,9 @@ run_frontend_e2e_tests() {
 
     cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
 
-    npm run e2e -- ${ARGS}
+    ${E2E_CMD} -- ${ARGS}
+
+    echo 'Frontend E2E tests successfully finished! Congratulations!'
 }
 
 run_build_doc() {
@@ -216,7 +267,19 @@ run_build_doc() {
 
   rm -rf "$REPO_DIR/build-doc/virtualenv"
 
+  alternatives --set python /usr/bin/python3
+
   admin/build-doc
+}
+
+run_serve_doc() {
+  echo 'Running "serve-doc"...'
+
+  cd "$REPO_DIR"
+
+  alternatives --set python /usr/bin/python2
+
+  admin/serve-doc
 }
 
 # End of sourced section. Do not exit shell when the script has been sourced.

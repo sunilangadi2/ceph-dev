@@ -1,11 +1,23 @@
+![Publish ceph images](https://github.com/rhcs-dashboard/ceph-dev/workflows/Publish%20ceph%20images/badge.svg?branch=master)
+
 # RHCS Dashboard Dev. Env.
 
-## Installation
+## Quick Install
 
-* If it doesn't exist, create a local directory for **ccache**:
-```
-mkdir -p ~/.ccache
-```
+1. Clone this repo: `git clone https://github.com/rhcs-dashboard/ceph-dev.git`
+1. Enter `ceph-dev` directory.
+1. To install `docker` and `docker-compose`, if you're using:
+   * Fedora: `sudo bash ./docker/scripts/install-docker-compose-fedora.sh`
+   * CentOS/RHEL: `sudo bash ./docker/scripts/install-docker-compose-centos-rhel.sh`
+   * Other OSes: please check [this](https://docs.docker.com/compose/install/).
+1. Use `.env.example` template for ceph-dev configuration: `cp .env.example .env`.
+1. Download the container images: `docker-compose pull`
+1. Launch everything: `docker-compose up -d`
+1. Check how things are going with `docker-compose logs -f ceph`:
+   * After a couple of minutes (aprox.) it'll finally print `All done`.
+1. The dashboard will be available at: `https://localhost:11000` with credentials: `admin / admin`.
+
+## Advanced Installation
 
 * Clone Ceph:
 ```
@@ -17,37 +29,19 @@ git clone git@github.com:ceph/ceph.git
 git clone git@github.com:rhcs-dashboard/ceph-dev.git
 ```
 
-* In ceph-dev, create *.env* file from template and set values:
+* In ceph-dev, create *.env* file from template and **set your local values**:
 ```
 cd ceph-dev
 cp .env.example .env
-
-# default values:
-
-HOST_CCACHE_DIR=/path/to/your/local/.ccache/dir
-
-CEPH_IMAGE_TAG=fedora29
-CEPH_REPO_DIR=/path/to/your/local/ceph/repo
-# Optional: a custom build directory other than default one ($CEPH_REPO_DIR/build)
-CEPH_CUSTOM_BUILD_DIR=
-# Set 5200 if you want to access the dashboard proxy at http://localhost:5200
-CEPH_PROXY_HOST_PORT=4200
-# Set 11001 if you want to access the dashboard at https://localhost:11001
-CEPH_HOST_PORT=11000
-
-GRAFANA_HOST_PORT=3000
-PROMETHEUS_HOST_PORT=9090
-NODE_EXPORTER_HOST_PORT=9100
-ALERTMANAGER_HOST_PORT=9093
 ```
 
-* Install [Docker Compose](https://docs.docker.com/compose/install/). If your OS is Fedora/CentOS/RHEL, you can run:
+* Install [Docker Compose](https://docs.docker.com/compose/install/) by running the following, depending on your OS:
 ```
 # Fedora:
-sudo bash ./scripts/docker/install-docker-compose-fedora.sh
+sudo bash ./docker/scripts/install-docker-compose-fedora.sh
 
-# CentOS/RHEL:
-sudo bash ./scripts/docker/install-docker-compose-centos-rhel.sh
+# CentOS 7 / RHEL 7:
+sudo bash ./docker/scripts/install-docker-compose-centos-rhel.sh
 ```
 
 If you ran the above script, then you can run *docker* and *docker-compose* without *sudo* if you log out and log in.
@@ -64,10 +58,7 @@ docker-compose run --rm -e HOST_PWD=$PWD ceph /docker/ci/pre-commit-setup.sh
 
 ## Usage
 
-* Build Ceph (with python 3: CEPH_IMAGE_TAG=fedora29; with python 2: CEPH_IMAGE_TAG=centos7):
-```
-docker-compose run --rm ceph /docker/build-ceph.sh
-```
+You don't need to build ceph if you've set ```CEPH_IMAGE=rhcsdashboard/ceph-rpm:...``` container image (the default).
 
 * Start ceph + dashboard feature services:
 ```
@@ -110,6 +101,15 @@ docker-compose up -d --scale ceph-host2=1
 docker-compose down
 ```
 
+* Build Ceph:
+```
+# Set a build-ready image and your local ccache path in .env file:
+CEPH_IMAGE=rhcsdashboard/ceph:master  # DO NOT use ceph-rpm:... image.
+HOST_CCACHE_DIR=/path/to/your/local/.ccache
+
+docker-compose run --rm ceph /docker/build-ceph.sh
+```
+
 * Rebuild not proxied dashboard frontend:
 ```
 docker-compose run --rm ceph /docker/build-dashboard-frontend.sh
@@ -148,20 +148,34 @@ docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_tox run -- pylint c
 docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_tox run -- pycodestyle controllers/health.py
 ```
 
+* Check dashboard python code with **mypy**:
+```
+# Enable mypy check in .env file:
+CHECK_MYPY=1
+
+docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_mypy
+
+# Only 1 file:
+docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_mypy src/pybind/mgr/dashboard/controllers/rgw.py
+```
+
 * Run API tests (integration tests based on [Teuthology](https://github.com/ceph/teuthology)):
 ```
+# Run tests interactively:
+docker-compose run --rm -p 11000:11000 ceph bash
+source /docker/ci/sanity-checks.sh && create_api_tests_cluster
+run_teuthology_tests tasks.mgr.dashboard.test_health
+run_teuthology_tests {moreTests}
+cleanup_teuthology  # this also outputs coverage report.
+
 # All tests:
 docker-compose run --rm ceph /docker/ci/run-api-tests.sh
 
 # Only specific tests:
 docker-compose run --rm ceph /docker/ci/run-api-tests.sh tasks.mgr.dashboard.test_health tasks.mgr.dashboard.test_pool
 
-# Run tests interactively:
-docker-compose run --rm ceph bash
-source /docker/ci/sanity-checks.sh && create_api_tests_cluster
-run_teuthology_tests tasks.mgr.dashboard.test_health
-run_teuthology_tests {moreTests}
-cleanup_teuthology
+# Only 1 test:
+docker-compose run --rm ceph /docker/ci/run-api-tests.sh tasks.mgr.dashboard.test_rgw.RgwBucketTest.test_all
 ```
 
 * Run frontend unit tests or lint:
@@ -186,19 +200,13 @@ docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_npm_lint
 * Run frontend E2E tests:
 ```
 # If ceph is running:
-docker-compose exec ceph /docker/e2e/run-frontend-e2e-tests.sh
+docker-compose exec ceph /docker/ci/sanity-checks.sh run_frontend_e2e_tests
 
-# If ceph is running (using e2e image):
-cd /path/to/your/local/ceph
-docker run --rm -v "$PWD"/src:/ceph/src -e BASE_URL=https://localhost:$CEPH_HOST_PORT --network=host docker.io/rhcsdashboard/e2e:nautilus
+# Only 1 specific test file:
+docker-compose exec ceph /docker/ci/sanity-checks.sh run_frontend_e2e_tests --spec "cypress/integration/ui/dashboard.e2e-spec.ts"
 
 # If ceph is not running:
-docker-compose run --rm ceph /docker/e2e/run-frontend-e2e-tests.sh
-```
-
-* Check dashboard python code with **mypy**:
-```
-docker-compose run --rm ceph bash -c ". /docker/ci/sanity-checks.sh && run_mypy"
+docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_frontend_e2e_tests
 ```
 
 * Run sanity checks:
@@ -208,12 +216,12 @@ docker-compose run --rm ceph /docker/ci/run-sanity-checks.sh
 
 * Build Ceph documentation:
 ```
-docker-compose run --rm ceph /docker/build-doc.sh
+docker-compose run --rm ceph /docker/ci/sanity-checks.sh run_build_doc
 ```
 
 * Display Ceph documentation:
 ```
-docker-compose run --rm -p 11001:8080 ceph admin/serve-doc
+docker-compose run --rm -p 11001:8080 ceph /docker/ci/sanity-checks.sh run_serve_doc
 
 # Access here: http://localhost:11001
 ```
@@ -270,6 +278,24 @@ RGW_MULTISITE=1
 docker-compose up -d --scale ceph-cluster2=1
 ```
 
+* Run 100s duration [benchmark](https://github.com/markhpc/hsbench#usage):
+```
+docker-compose exec ceph-cluster2 bash
+hsbench -a <rgw-user-access-key> -s <rgw-user-secret-key> -u http://127.0.0.1:8000 -z 4K -d 100 -t 10 -b 10
+```
+
+## Access local dashboard connected to remote cluster
+
+* Set appropriate values in *.env*:
+```
+REMOTE_DASHBOARD_URL=http://remote.ceph.cluster.com:8443
+```
+
+* Start only ceph:
+```
+docker-compose up -d ceph
+```
+
 ## Build and push an image to docker registry:
 
 If you want to update an image, you'll have to edit image's Dockerfile and then:
@@ -279,8 +305,7 @@ If you want to update an image, you'll have to edit image's Dockerfile and then:
 docker build -t {imageName}:{imageTag} -f {/path/to/Dockerfile} ./docker/ceph
 
 # Example:
-docker build -t rhcsdashboard/ceph:fedora29 -f ./docker/ceph/fedora/Dockerfile ./docker/ceph
-docker build -t rhcsdashboard/ceph:centos7 -f ./docker/ceph/centos/Dockerfile  ./docker/ceph
+docker build -t rhcsdashboard/ceph:master -f ./docker/ceph/master/Dockerfile  ./docker/ceph
 ```
 
 * Optionally, create an additional tag:
@@ -288,8 +313,7 @@ docker build -t rhcsdashboard/ceph:centos7 -f ./docker/ceph/centos/Dockerfile  .
 docker tag {imageName}:{imageTag} {imageName}:{imageNewTag}
 
 # Example:
-docker tag rhcsdashboard/ceph:fedora29 rhcsdashboard/ceph:latest
-docker tag rhcsdashboard/ceph:centos7 rhcsdashboard/ceph:latest
+docker tag rhcsdashboard/ceph:master rhcsdashboard/ceph:latest
 ```
 
 * Log in to rhcs-dashboard docker registry:
@@ -302,22 +326,12 @@ docker login -u rhcsdashboard
 docker push {imageName}:{imageTag}
 
 # Example:
-docker push rhcsdashboard/ceph:fedora29
-docker push rhcsdashboard/ceph:centos7
+docker push rhcsdashboard/ceph:master
 ```
 
 ## Start Ceph 2 (useful for parallel development)
 
-* Set appropriate values in *.env*:
-```
-CEPH2_IMAGE_TAG=fedora29
-CEPH2_REPO_DIR=/path/to/your/local/ceph2
-CEPH2_CUSTOM_BUILD_DIR=
-# default: 4202
-CEPH2_PROXY_HOST_PORT=4202
-# default: 11002
-CEPH2_HOST_PORT=11002
-```
+* Set your `CEPH2_` local values in *.env*.
 
 * Start ceph2 + ceph + ...:
 ```
@@ -325,58 +339,4 @@ docker-compose up -d --scale ceph2=1
 
 # Start ceph2 but not ceph:
 docker-compose up -d --scale ceph2=1 --scale ceph=0
-```
-
-## Start Ceph RPM version
-
-* Set appropriate values in *.env*:
-```
-CEPH_RPM_IMAGE=rhcsdashboard/nautilus:v14.2.0
-# default: 11001
-CEPH_RPM_HOST_PORT=11001
-
-# Start ceph-rpm in dashboard development mode (experimental feature):
-CEPH_RPM_IMAGE=rhcsdashboard/ceph-rpm
-CEPH_RPM_REPO_DIR=/path/to/your/local/ceph
-```
-
-* Start ceph-rpm + ceph + ...:
-```
-docker-compose up -d --scale ceph-rpm=1
-
-# Start ceph-rpm but not ceph:
-docker-compose up -d --scale ceph-rpm=1 --scale ceph=0
-
-# Start only ceph-rpm:
-docker-compose up -d --scale ceph-rpm=1 ceph-rpm
-```
-
-* Create ceph-rpm image:
-```
-# Fedora-based master branch:
-docker build -t rhcsdashboard/ceph-rpm \
--f ./docker/ceph/rpm/fedora/Dockerfile ./docker/ceph \
---build-arg REPO_URL=''
---network=host
-
-# Fedora-based nautilus branch (for backporting):
-docker build -t rhcsdashboard/nautilus \
--f ./docker/ceph/rpm/fedora/Dockerfile ./docker/ceph \
---build-arg REPO_URL=https://4.chacra.ceph.com/r/ceph/nautilus/5ce0d6822d529ec047933b3c3980eedcd97ec59c/centos/7/flavors/notcmalloc/x86_64/ \
---build-arg VCS_BRANCH=nautilus \
---network=host
-
-# Fedora-based nautilus stable release (version tag has to be checked before running this):
-docker build -t rhcsdashboard/nautilus:v14.2.1 \
--f ./docker/ceph/rpm/fedora/Dockerfile ./docker/ceph \
---build-arg REPO_URL=https://download.ceph.com/rpm-nautilus/el7/x86_64/ \
---build-arg VCS_BRANCH=v14.2.1 \
---network=host
-
-# RHEL8-based RHCS4:
-docker build -t rhcsdashboard/rhcs4 \
--f ./docker/ceph/rpm/rhel/Dockerfile ./docker/ceph \
---build-arg REPO_URL={rhcs4-repo-url} \
---build-arg VCS_BRANCH={ceph-release-version-tag-that-rhcs4-is-based-on} \
---network=host
 ```

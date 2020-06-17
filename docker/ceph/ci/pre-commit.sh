@@ -6,22 +6,6 @@ echo 'Running pre-commit hook...'
 
 source /docker/ci/sanity-checks.sh
 
-run_npm_lint_html() {
-    echo 'Running "npm lint:html"...'
-
-    cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
-
-    npm run lint:html --if-present && npm run lint:htmlhint --if-present
-}
-
-run_npm_fix() {
-    echo 'Running "npm fix"...'
-
-    cd "$REPO_DIR"/src/pybind/mgr/dashboard/frontend
-
-    npm run fix --if-present
-}
-
 readonly NPM_PACKAGE_FILES=$(git diff --cached --name-only --diff-filter=ACMRTUXB | grep -E "package(-lock){0,1}.json" | wc -l)
 readonly HTML_FILES=$(git diff --cached --name-only --diff-filter=ACMRTUXB -- "*.html" | wc -l)
 readonly SCSS_FILES=$(git diff --cached --name-only --diff-filter=ACMRTUXB -- "*.scss" | tr '\n' ' ')
@@ -39,6 +23,7 @@ if [[ "$HTML_FILES" > 0 && -z "$SCSS_FILES" && -z "$TS_FILES" ]]; then
 fi
 
 if [[ -n "$SCSS_FILES" || -n "$TS_FILES" ]]; then
+    check_browser_console_calls "$SCSS_FILES $TS_FILES"
     run_npm_fix
 
     # Add fixes to staging:

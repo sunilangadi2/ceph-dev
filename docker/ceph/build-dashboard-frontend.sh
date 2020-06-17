@@ -7,7 +7,7 @@ cd /ceph/src/pybind/mgr/dashboard/frontend
 rm -rf dist
 
 npm cache clean --force
-npm install
+npm ci
 
 cd /ceph/build
 

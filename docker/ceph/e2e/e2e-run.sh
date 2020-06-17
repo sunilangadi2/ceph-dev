@@ -4,7 +4,10 @@ set -eo pipefail
 
 cd /ceph/src/pybind/mgr/dashboard/frontend
 
-npm install
+export NODE_OPTIONS=--max_old_space_size=4096
+npm ci
+
+npx webdriver-manager update --versions.chrome=$(google-chrome --version | awk '{ print $3 }')
 
 ARGS="--dev-server-target --webdriverUpdate=false"
 ANGULAR_VERSION=$(npm run ng version | grep 'Angular: ' | awk '{ print substr($2,1,1) }')
